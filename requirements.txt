@@ -1,0 +1,6 @@
+pathway
+openai
+streamlit
+pandas
+numpy
+scipy
