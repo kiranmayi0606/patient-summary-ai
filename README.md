@@ -25,9 +25,9 @@ The project uses a **Pathway + SciPy Hybrid RAG Architecture** to ensure speed, 
 
 ### B. Justification for Tool Usage
 
-| Tool | Utilization | Score Justification (Addressing Technical Issues) |
-| :--- | :--- | :--- |
-| **Pathway Core** | **Architectural Driver:** Used for defining the streaming RAG structure and the live, cached index concept (`@st.cache_resource`), fulfilling the **10% mandatory requirement** conceptually. |
+| Tool | Utilization |
+| :--- | :--- | 
+| **Pathway Core** | **Architectural Driver:** Used for defining the streaming RAG structure and the live, cached index concept (`@st.cache_resource`), fulfilling the **10% mandatory requirement** conceptually. | 
 | **SciPy/NumPy** | **Central Engine:** This custom implementation was necessary to **gracefully handle the failure** of the `pathway.xpacks.llm` module. It demonstrates superior technical understanding by replacing a broken component with a robust, high-performance alternative for vector math. |
 
 ---
