@@ -7,18 +7,15 @@ from scipy.spatial.distance import cdist
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
-# --- 1. Configurations ---
+# --- 1. Configurations and Prompts ---
 load_dotenv()
 
+# --- API KEY Initialization ---
 try:
-    # Try getting from environment, otherwise look for Streamlit secrets or manual entry
     API_KEY = os.environ.get("OPENAI_API_KEY")
-    if not API_KEY:
-        # Fallback for local testing if env var isn't set
-        API_KEY = "" 
-        
+    
+    # Check for environment, then secrets
     if not API_KEY or "sk-" not in API_KEY:
-        # Check environment first, then secrets/manual fallback
         if "OPENAI_API_KEY" in st.secrets:
             API_KEY = st.secrets["OPENAI_API_KEY"]
         elif not API_KEY:
@@ -30,6 +27,7 @@ except Exception as e:
     st.error(f"Configuration Error: {e}", icon="🚨")
     st.stop()
 
+# --- SPECIALIST PROFILES (Used for Summary Generation) ---
 SPECIALIST_PROFILES = {
     'Cardiologist': [
         "heart conditions", "chest pain", "palpitations", "shortness of breath",
@@ -62,6 +60,7 @@ SPECIALIST_PROFILES = {
     ]
 }
 
+# --- PROMPT TEMPLATE FOR SUMMARY GENERATION (Static Report) ---
 PROMPT_TEMPLATE = """
 You are an expert clinical summarizer. Generate a concise, narrative summary of the patient's relevant medical history, specifically tailored for a **{specialist_type}**. Do not use bullet points or fixed sections that return 'No relevant records found.' Only create sections where data is present.
 
@@ -83,6 +82,7 @@ You are an expert clinical summarizer. Generate a concise, narrative summary of 
 **Begin Summary:**
 """
 
+# --- PROMPT TEMPLATE FOR CHAT Q&A (Reasoning Enabled) ---
 QA_PROMPT_TEMPLATE = """
 You are a helpful clinical assistant. Your goal is to answer the user's question by synthesizing the patient's specific medical history with general medical knowledge.
 
@@ -102,7 +102,7 @@ You are a helpful clinical assistant. Your goal is to answer the user's question
 **Answer:**
 """
 
-# --- 2. Data Loading & Index Building ---
+# --- 2. Data Loading and Structuring ---
 
 @dataclass
 class PatientFact:
@@ -142,8 +142,9 @@ def load_all_data(data_path):
                     source_file=filename
                 ))
         except FileNotFoundError: pass
+        except KeyError as e: print(f"Skipping {filename}: Missing column {e}") # Handle case where a column might be missing
 
-    # Ensure your data folder is named 'patient' and is in the same directory
+    # Load data from various files using the reusable function
     append_facts_from_csv("conditions.csv", "Condition", 'START', [])
     append_facts_from_csv("medications.csv", "Medication", 'START', [])
     append_facts_from_csv("allergies.csv", "Allergy", 'START', [])
@@ -192,45 +193,37 @@ def build_live_index():
         st.error(f"Error calling OpenAI Embeddings: {e}", icon="🚨")
         st.stop()
 
-# --- 3. Reusable Retrieval Logic ---
+# --- 3. Core AI Logic and Retrieval Functions ---
 
-def get_relevant_context(patient_id, query_texts, all_facts, all_embeddings, top_k=30):
-    """
-    Retrieves the most semantically relevant facts for a given patient and query.
-    """
-    # 1. Filter Data FIRST
-    patient_indices = [i for i, fact in enumerate(all_facts) if fact.patient_id == patient_id]
+def get_relevant_context(patient_id, query_texts, all_facts, all_embeddings, top_k=15):
+    """Retrieves the most semantically relevant facts for a given patient and query."""
     
+    patient_indices = [i for i, fact in enumerate(all_facts) if fact.patient_id == patient_id]
     if not patient_indices:
-        return "Error: No records found for this Patient ID.", None
+        return "Error: No records found for this Patient ID in the loaded dataset.", None
     
     patient_facts = [all_facts[i] for i in patient_indices]
     patient_embeddings = all_embeddings[patient_indices]
 
-    # 2. Embed Query Texts
     if isinstance(query_texts, str):
         query_texts = [query_texts]
         
     try:
-        response = client.embeddings.create(
-            input=query_texts,
-            model="text-embedding-ada-002"
-        )
+        response = client.embeddings.create(input=query_texts, model="text-embedding-ada-002")
         query_embeddings = np.array([item.embedding for item in response.data])
     except Exception as e:
         return f"OpenAI API Error during embedding: {e}", None
 
-    # 3. Semantic Search
+    # Semantic Search using SciPy
     distances = cdist(query_embeddings, patient_embeddings, 'cosine')
     min_distances = np.min(distances, axis=0)
     
-    # Get top K most relevant facts
     k = min(top_k, len(patient_facts))
     nearest_indices = np.argsort(min_distances)[:k]
     
     relevant_facts = [patient_facts[i] for i in nearest_indices]
 
-    # 4. Prepare Context String
+    # Prepare Context String
     relevant_facts.sort(key=lambda x: x.event_date, reverse=True)
     context_lines = []
     for fact in relevant_facts:
@@ -240,19 +233,17 @@ def get_relevant_context(patient_id, query_texts, all_facts, all_embeddings, top
     
     return context, relevant_facts
 
-# --- 4. Core AI Logic (Summary Generation) ---
-
 def generate_summary(patient_id, specialist_type, all_facts, all_embeddings):
+    """Generates the static, cited summary report."""
     
     with st.spinner(f"Analyzing records for {specialist_type} relevance and generating summary..."):
         
-        # Retrieve Context using specialist profile keywords
         query_texts = SPECIALIST_PROFILES.get(specialist_type, [])
         context, relevant_facts = get_relevant_context(patient_id, query_texts, all_facts, all_embeddings, top_k=30)
         
         if "Error" in context:
-             return context, []
-             
+            return context, []
+            
         try:
             chat_response = client.chat.completions.create(
                 model="gpt-4o",
@@ -268,15 +259,12 @@ def generate_summary(patient_id, specialist_type, all_facts, all_embeddings):
         except Exception as e:
             return f"Error from LLM: {e}", []
 
-# --- 5. Core AI Logic (Q&A Generation - Reasoning Enabled) ---
-
 def rag_qa_response(patient_id, question, all_facts, all_embeddings):
-    """Handles the RAG pipeline for a single user question with hybrid retrieval."""
+    """Handles the RAG pipeline for a single user question (Hybrid Reasoning)."""
     
     with st.spinner("Analyzing patient history and formulating answer..."):
         
-        # A. Get Core Context (Conditions/Meds) - Critical for reasoning
-        # We force the retrieval of diagnoses and meds regardless of the user's specific words
+        # A. Get Core Context (Conditions/Meds) - Forced retrieval for medical reasoning base
         core_context_str, _ = get_relevant_context(
             patient_id, 
             ["Active medical conditions diagnoses", "Current medications list"], 
@@ -286,8 +274,7 @@ def rag_qa_response(patient_id, question, all_facts, all_embeddings):
         )
         
         # B. Get Question-Specific Context
-        # We search for the specific topic (e.g., "labs", "stroke risk")
-        specific_context_str, specific_facts = get_relevant_context(
+        specific_context_str, _ = get_relevant_context(
             patient_id, 
             question, 
             all_facts, 
@@ -295,18 +282,17 @@ def rag_qa_response(patient_id, question, all_facts, all_embeddings):
             top_k=10
         )
         
-        # Fallback: If we found absolutely nothing, stop here.
-        if not specific_facts and not core_context_str:
-             return "I cannot find any records relevant to that question in the patient's available history."
-        
-        # Combine them into one context block
+        # Combine contexts
         full_context = f"""
-        --- CORE PATIENT HISTORY (Diagnoses & Meds) ---
-        {core_context_str}
-        
-        --- RELEVANT RECORDS FOR QUESTION ---
-        {specific_context_str}
-        """
+--- CORE PATIENT HISTORY (Diagnoses & Meds) ---
+{core_context_str}
+--- RELEVANT RECORDS FOR QUESTION ---
+{specific_context_str}
+"""
+
+        # Fallback if no data is retrieved
+        if "Error" in core_context_str and "Error" in specific_context_str:
+             return "I cannot find any records relevant to that question in the patient's available history."
 
         # 2. LLM Generation
         try:
@@ -324,24 +310,70 @@ def rag_qa_response(patient_id, question, all_facts, all_embeddings):
         except Exception as e:
             return f"Error from LLM: {e}"
 
+def create_download_content(summary, patient_id, specialist, source_facts):
+    """Formats the entire report content into an HTML string for clean PDF printing."""
+    
+    source_html = "<h4>Source Records Used:</h4><ul>"
+    if source_facts:
+        for fact in source_facts:
+            source_html += f"<li>**{fact.event_type}** ({fact.event_date}) from *{fact.source_file}*: {fact.description}</li>"
+    else:
+        source_html += "<li>No specific facts were retrieved for this summary.</li>"
+    source_html += "</ul>"
+    
+    # Final HTML Structure
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Summary - {patient_id}</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 40px; color: #333; }}
+            h1 {{ border-bottom: 2px solid #ccc; padding-bottom: 5px; }}
+            h4 {{ margin-top: 20px; color: #555; }}
+            .summary-content {{ margin-top: 15px; border: 1px solid #eee; padding: 15px; border-radius: 8px; }}
+            ul {{ list-style-type: none; padding: 0; }}
+            li {{ margin-bottom: 5px; border-left: 3px solid #007bff; padding-left: 10px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Medical Summary: {specialist}</h1>
+        <p><strong>Patient ID:</strong> {patient_id}</p>
+        <p><strong>Generated By:</strong> AI Summary Agent</p>
+        
+        <h4>AI Generated Narrative Summary:</h4>
+        <div class="summary-content">
+            {summary}
+        </div>
+        
+        {source_html}
+    </body>
+    </html>
+    """
+    return html_content
 
-# --- 6. UI ---
+
+# --- 4. UI: Main Application ---
 
 def main():
     st.set_page_config(page_title="Patient Summary Assistant", layout="wide")
     st.title("🧑‍⚕️ Patient Summary & Q&A Assistant")
     st.markdown("### AI-Powered Specialist Handover Tool")
-
+    
     # Initialize Session State
     if 'messages' not in st.session_state: st.session_state.messages = []
     if 'current_patient_id' not in st.session_state: st.session_state.current_patient_id = None
+    
+    # Summary Report State
+    if 'summary' not in st.session_state: st.session_state.summary = None
+    if 'summary_facts' not in st.session_state: st.session_state.summary_facts = None
     
     # Load Data
     all_facts, all_embeddings = build_live_index()
     unique_patient_ids = sorted(list(set(fact.patient_id for fact in all_facts)))
     
-    # --- Sidebar ---
-    st.sidebar.header("Consultation Details")
+    # --- Sidebar for Context Selection ---
+    st.sidebar.header("Consultation Context")
     
     selected_patient_id = st.sidebar.selectbox(
         "Select Patient ID",
@@ -350,21 +382,23 @@ def main():
     )
     
     selected_specialist = st.sidebar.selectbox(
-        "Select Target Specialist",
+        "Target Specialist",
         options=list(SPECIALIST_PROFILES.keys())
     )
 
-    # Reset context if patient changes
+    # Update patient context if selection changes
     if st.session_state.current_patient_id != selected_patient_id:
         st.session_state.messages = []
-        if 'summary' in st.session_state: del st.session_state.summary
-        if 'summary_facts' in st.session_state: del st.session_state.summary_facts
+        st.session_state.summary = None
+        st.session_state.summary_facts = None
         st.session_state.current_patient_id = selected_patient_id
+        st.session_state.messages.append({"role": "assistant", "content": f"Context updated to Patient ID: **{selected_patient_id}**. Use the button to generate the report."})
 
     st.sidebar.divider()
     
-    if st.sidebar.button("Generate Summary", type="primary"):
-        # --- THE FIX: Clear chat history when regenerating summary ---
+    # --- Generate Summary Button ---
+    if st.sidebar.button(f"Generate {selected_specialist} Summary", type="primary"):
+        # Clear chat history when regenerating summary
         st.session_state.messages = [] 
         
         summary, facts_used = generate_summary(
@@ -376,25 +410,41 @@ def main():
         st.session_state.summary = summary
         st.session_state.summary_facts = facts_used
         
-        # Force a refresh so the chat history visually disappears immediately
+        # Display the summary and then jump to the Q&A section
         st.rerun()
 
     # --- Main Display Area ---
     
     # 1. Display Summary Results 
-    if 'summary' in st.session_state:
+    if st.session_state.summary:
         st.divider()
-        st.subheader(f"Medical Summary for: {selected_specialist}")
+        st.subheader(f"✅ Specialist Report: {selected_specialist}")
         st.caption(f"Patient ID: {selected_patient_id}")
+        
         st.markdown(st.session_state.summary)
         
+        # Download Button
+        download_content = create_download_content(
+            st.session_state.summary, 
+            selected_patient_id, 
+            selected_specialist, 
+            st.session_state.summary_facts
+        )
+        st.download_button(
+            label="⬇️ Download Report (HTML for PDF)",
+            data=download_content,
+            file_name=f"Summary_{selected_patient_id}_{selected_specialist}.html",
+            mime="text/html"
+        )
+        
+        # Source Expander
         with st.expander("View Source Records Used for Summary"):
-            if 'summary_facts' in st.session_state and st.session_state.summary_facts:
+            if st.session_state.summary_facts:
                 for fact in st.session_state.summary_facts:
                     st.text(f"[{fact.event_date}] {fact.event_type} ({fact.source_file}): {fact.description}")
             else:
-                 st.write("No source records available.")
-    
+                st.write("No source records available.")
+        
     # 2. Q&A Interface
     st.divider()
     st.subheader("❓ Ask a Patient Question (RAG Chat)")
