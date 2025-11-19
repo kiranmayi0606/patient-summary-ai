@@ -4,3 +4,4 @@ streamlit
 pandas
 numpy
 scipy
+pdf2image

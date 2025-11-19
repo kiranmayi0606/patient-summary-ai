@@ -1,0 +1,16 @@
+Python virtual environment
+.venv/
+
+Secret keys
+.env
+
+Built outputs and cache
+
+pycache/
+*.pyc
+*.log
+
+Operating System and Editor files
+
+.DS_Store # macOS
+.vscode/ # Visual Studio Code settings (Optional, but usually recommended)
