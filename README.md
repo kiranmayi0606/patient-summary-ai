@@ -69,3 +69,17 @@ Run the following in your project directory:
 ```bash
 
 pip install -r requirements.txt
+
+Running the Application
+Set API Key (Mandatory): Run this command in the same Terminal session you use to run the app. Replace the placeholder with your actual key.
+
+Bash
+
+export OPENAI_API_KEY="sk-your-personal-access-key-here"
+Run Streamlit:
+
+Bash
+
+streamlit run app.py
+
+The app will load quickly (due to the DATA_LIMIT constraint) and automatically populate the dropdown with available Patient IDs.
